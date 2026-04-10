@@ -38,11 +38,12 @@ class SettingsManager: ObservableObject {
     @AppStorage("hotkey3Code") var hotkey3Code: Int = 99
     
     private func updateLoginItem() {
+        // Since we are now an app, we should use loginItem instead of register() for Daemons
         do {
             if startAtLogin {
-                try SMAppService.mainApp.register()
+                try SMAppService.loginItem(identifier: "com.user.retina-aware").register()
             } else {
-                try SMAppService.mainApp.unregister()
+                try SMAppService.loginItem(identifier: "com.user.retina-aware").unregister()
             }
         } catch {
             print("Failed to update login item: \(error)")
@@ -118,9 +119,12 @@ class BrightnessManager: ObservableObject {
         let mousePos = NSEvent.mouseLocation
         let onRetina = isPointOnRetina(mousePos)
         
-        if onRetina && !isMouseOnRetina { handleRetinaEntry() }
-        else if !onRetina && isMouseOnRetina { handleRetinaExit() }
-        else if !onRetina { checkApproach(mousePos) }
+        if onRetina {
+            if !isMouseOnRetina { handleRetinaEntry() }
+        } else {
+            if isMouseOnRetina { handleRetinaExit() }
+            checkApproach(mousePos)
+        }
         
         isMouseOnRetina = onRetina
     }
@@ -154,7 +158,7 @@ class BrightnessManager: ObservableObject {
         }
     }
 
-    private func dimRetina() {
+    func dimRetina() {
         isDimmed = true
         applyBrightness(Float(settings.dimBrightness))
     }
@@ -166,7 +170,7 @@ class BrightnessManager: ObservableObject {
         let retinaFrame = retinaScreen.frame
         var distance: CGFloat = CGFloat(settings.approachThreshold) + 1
         
-        // Dynamic border detection based on user setting
+        // Border detection
         switch settings.retinaPosition {
         case .left:
             if mousePos.x >= retinaFrame.maxX && mousePos.x < retinaFrame.maxX + CGFloat(settings.approachThreshold) {
@@ -199,10 +203,11 @@ class BrightnessManager: ObservableObject {
             let target = settings.dimBrightness + (settings.activeBrightness - settings.dimBrightness) * Double(proximity)
             applyBrightness(Float(target))
             isDimmed = false
-        } else if isDimmed == false && dimTimer == nil {
-            // BUG FIX: Mouse left the approach zone quickly without entering Retina
-            // Reset to dim brightness immediately
-            dimRetina()
+        } else {
+            // FIX: If we are not in approach zone AND not in Retina, we MUST be dimmed (unless force-wake timer is active)
+            if dimTimer == nil && !isDimmed {
+                dimRetina()
+            }
         }
     }
 
@@ -211,7 +216,6 @@ class BrightnessManager: ObservableObject {
     }
 
     func setupHotkeys() {
-        // Clear old hotkeys if any (complex in Carbon, we just re-register for now)
         registerHotkey(id: 1, keyCode: UInt32(settings.hotkey1Code))
         registerHotkey(id: 2, keyCode: UInt32(settings.hotkey2Code))
         registerHotkey(id: 3, keyCode: UInt32(settings.hotkey3Code))
@@ -262,7 +266,16 @@ struct SettingsView: View {
             HStack {
                 Text("RetinaAware").font(.system(size: 18, weight: .bold))
                 Spacer()
-                Toggle("", isOn: $settings.isEnabled).toggleStyle(.switch)
+                Toggle("", isOn: $settings.isEnabled)
+                    .toggleStyle(.switch)
+                    .onChange(of: settings.isEnabled) { value in
+                        if value {
+                            manager.dimRetina()
+                        } else {
+                            manager.applyBrightness(Float(settings.activeBrightness))
+                            manager.isDimmed = false
+                        }
+                    }
             }
             .padding()
             .background(Color.secondary.opacity(0.1))
@@ -292,7 +305,9 @@ struct SettingsView: View {
                         Button("Test Levels (2s cycle)") {
                             manager.applyBrightness(Float(settings.activeBrightness))
                             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                                manager.applyBrightness(Float(settings.dimBrightness))
+                                if settings.isEnabled {
+                                    manager.applyBrightness(Float(settings.dimBrightness))
+                                }
                             }
                         }.buttonStyle(.bordered)
                     }
@@ -327,7 +342,7 @@ struct SettingsView: View {
             VStack(spacing: 4) {
                 Divider()
                 HStack {
-                    Text("v1.2 • made with ❤️ by nGoline in 🇧🇷")
+                    Text("v1.2.1 • made with ❤️ by nGoline in 🇧🇷")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
                     Spacer()
