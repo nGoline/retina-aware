@@ -9,3 +9,6 @@ DerivedData/
 *.swp
 *.out.log
 *.err.log
+
+# vscode
+.vscode/

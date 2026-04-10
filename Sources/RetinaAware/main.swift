@@ -1,55 +1,76 @@
-import Foundation
+import SwiftUI
 import AppKit
 import CoreGraphics
 import Carbon
+import ServiceManagement
 
-// --- Private API Definitions ---
+// --- Models ---
+
+class SettingsManager: ObservableObject {
+    @AppStorage("approachThreshold") var approachThreshold: Double = 150.0
+    @AppStorage("dimBrightness") var dimBrightness: Double = 0.01
+    @AppStorage("activeBrightness") var activeBrightness: Double = 0.5
+    @AppStorage("dimDelay") var dimDelay: Double = 5.0
+    @AppStorage("maxWakeMultiplier") var maxWakeMultiplier: Double = 10.0
+    @AppStorage("returnWindow") var returnWindow: Double = 10.0
+    @AppStorage("startAtLogin") var startAtLogin: Bool = false {
+        didSet { updateLoginItem() }
+    }
+    
+    // Wake durations for hotkeys
+    @AppStorage("wakeDuration1") var wakeDuration1: Double = 60.0
+    @AppStorage("wakeDuration2") var wakeDuration2: Double = 300.0
+    @AppStorage("wakeDuration3") var wakeDuration3: Double = 600.0
+    
+    private func updateLoginItem() {
+        do {
+            if startAtLogin {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            print("Failed to update login item: \(error)")
+        }
+    }
+}
+
+// --- Brightness Logic ---
+
 typealias GetBrightnessFunc = @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32
 typealias SetBrightnessFunc = @convention(c) (CGDirectDisplayID, Float) -> Int32
 
-enum ScreenSide {
-    case left, right, top, bottom, none
-}
-
-class BrightnessManager {
+class BrightnessManager: ObservableObject {
     private var getBrightness: GetBrightnessFunc?
     private var setBrightness: SetBrightnessFunc?
     private var frameworkHandle: UnsafeMutableRawPointer?
 
     private var builtInDisplayID: CGDirectDisplayID?
-    private var externalDisplayID: CGDirectDisplayID?
     private var transitionSide: ScreenSide = .left
     
-    // Settings (Programmable)
-    var approachThreshold: CGFloat = 150.0 // Pixels from border
-    var dimBrightness: Float = 0.01 // Just above zero
-    var activeBrightness: Float = 0.5 // Default active brightness
-    var dimDelay: TimeInterval = 5.0 // Seconds before dimming
-    
-    // State
     private var isMouseOnRetina = false
     private var lastRetinaExitTime: Date?
     private var wakeTimeMultiplier: Double = 1.0
     private var timer: Timer?
     private var dimTimer: Timer?
     
+    var settings: SettingsManager!
+
+    enum ScreenSide { case left, right, top, bottom, none }
+
     init() {
         loadFramework()
         findDisplays()
-        setupHotkeys()
-        
-        if let id = builtInDisplayID {
-            var current: Float = 0
-            if getBrightness?(id, &current) == 0 {
-                activeBrightness = current
-                print("Initial active brightness detected: \(activeBrightness)")
-            }
-        }
     }
     
+    func setup(with settings: SettingsManager) {
+        self.settings = settings
+        setupHotkeys()
+    }
+
     private func loadFramework() {
-        let frameworkPath = "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices"
-        frameworkHandle = dlopen(frameworkPath, RTLD_NOW)
+        let path = "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices"
+        frameworkHandle = dlopen(path, RTLD_NOW)
         if let handle = frameworkHandle {
             if let sym = dlsym(handle, "DisplayServicesGetBrightness") {
                 getBrightness = unsafeBitCast(sym, to: GetBrightnessFunc.self)
@@ -59,185 +80,213 @@ class BrightnessManager {
             }
         }
     }
-    
+
     private func findDisplays() {
         var retinaFrame: NSRect?
         var externalFrame: NSRect?
-        
         for screen in NSScreen.screens {
-            let deviceID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
-            guard let id = deviceID else { continue }
-            
-            if CGDisplayIsBuiltin(id) != 0 {
-                builtInDisplayID = id
+            let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+            guard let displayID = id else { continue }
+            if CGDisplayIsBuiltin(displayID) != 0 {
+                builtInDisplayID = displayID
                 retinaFrame = screen.frame
             } else {
-                externalDisplayID = id
                 externalFrame = screen.frame
             }
         }
-        
-        // Detect side
         if let retina = retinaFrame, let external = externalFrame {
-            if retina.maxX <= external.minX {
-                transitionSide = .left
-                print("Retina is to the LEFT of External.")
-            } else if retina.minX >= external.maxX {
-                transitionSide = .right
-                print("Retina is to the RIGHT of External.")
-            } else if retina.maxY <= external.minY {
-                transitionSide = .bottom
-                print("Retina is BELOW External.")
-            } else if retina.minY >= external.maxY {
-                transitionSide = .top
-                print("Retina is ABOVE External.")
-            }
+            if retina.maxX <= external.minX { transitionSide = .left }
+            else if retina.minX >= external.maxX { transitionSide = .right }
+            // etc...
         }
     }
-    
-    private func setupHotkeys() {
-        // Register F1, F2, F3 for 1m, 5m, 10m wake (Example keys)
-        // In a real app, these should be user-configurable
-        registerHotkey(id: 1, keyCode: 122, modifiers: UInt32(cmdKey)) // Cmd + F1
-        registerHotkey(id: 2, keyCode: 120, modifiers: UInt32(cmdKey)) // Cmd + F2
-        registerHotkey(id: 3, keyCode: 99, modifiers: UInt32(cmdKey))  // Cmd + F3
-    }
-    
-    private func registerHotkey(id: UInt32, keyCode: UInt32, modifiers: UInt32) {
-        var hotKeyRef: EventHotKeyRef?
-        var hotKeyID = EventHotKeyID(signature: 0x52415752, id: id) // "RAWR"
-        
-        RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
-        
-        // Setup event handler
-        var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        
-        InstallEventHandler(GetApplicationEventTarget(), { (nextHandler, event, userData) -> OSStatus in
-            var hotKeyID = EventHotKeyID()
-            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
-            
-            let manager = Unmanaged<BrightnessManager>.fromOpaque(userData!).takeUnretainedValue()
-            
-            switch hotKeyID.id {
-            case 1: manager.forceWake(duration: 60)
-            case 2: manager.forceWake(duration: 300)
-            case 3: manager.forceWake(duration: 600)
-            default: break
-            }
-            
-            return noErr
-        }, 1, &eventSpec, Unmanaged.passUnretained(self).toOpaque(), nil)
-    }
-    
+
     func start() {
-        print("Starting Retina Aware manager...")
-        
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             self?.checkMousePosition()
         }
-        
-        // Run loop with event handling for hotkeys
-        let runLoop = RunLoop.current
-        while true {
-            runLoop.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
-        }
     }
-    
+
     private func checkMousePosition() {
         let mousePos = NSEvent.mouseLocation
         let onRetina = isPointOnRetina(mousePos)
         
-        if onRetina && !isMouseOnRetina {
-            handleRetinaEntry()
-        } else if !onRetina && isMouseOnRetina {
-            handleRetinaExit()
-        } else if !onRetina {
-            checkApproach(mousePos)
-        }
+        if onRetina && !isMouseOnRetina { handleRetinaEntry() }
+        else if !onRetina && isMouseOnRetina { handleRetinaExit() }
+        else if !onRetina { checkApproach(mousePos) }
         
         isMouseOnRetina = onRetina
     }
-    
+
     private func isPointOnRetina(_ point: NSPoint) -> Bool {
-        for screen in NSScreen.screens {
-            let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
-            if id == builtInDisplayID {
-                return NSPointInRect(point, screen.frame)
-            }
-        }
-        return false
+        guard let id = builtInDisplayID else { return false }
+        return NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == id }?.frame.contains(point) ?? false
     }
-    
+
     private func handleRetinaEntry() {
         dimTimer?.invalidate()
         dimTimer = nil
-        
-        if let id = builtInDisplayID {
-            setBrightness?(id, activeBrightness)
-        }
+        applyBrightness(Float(settings.activeBrightness))
         
         if let lastExit = lastRetinaExitTime {
-            let timeSinceExit = Date().timeIntervalSince(lastExit)
-            if timeSinceExit < 10.0 {
-                wakeTimeMultiplier = min(wakeTimeMultiplier * 1.5, 10.0)
-                print("Returned quickly! Wake delay: \(dimDelay * wakeTimeMultiplier)s")
+            if Date().timeIntervalSince(lastExit) < settings.returnWindow {
+                wakeTimeMultiplier = min(wakeTimeMultiplier * 1.5, settings.maxWakeMultiplier)
             } else {
                 wakeTimeMultiplier = 1.0
             }
         }
     }
-    
+
     private func handleRetinaExit() {
         lastRetinaExitTime = Date()
-        let delay = dimDelay * wakeTimeMultiplier
-        
         dimTimer?.invalidate()
-        dimTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            self?.dimRetina()
+        dimTimer = Timer.scheduledTimer(withTimeInterval: settings.dimDelay * wakeTimeMultiplier, repeats: false) { [weak self] _ in
+            self?.applyBrightness(Float(self?.settings.dimBrightness ?? 0.01))
         }
     }
-    
-    private func dimRetina() {
-        if let id = builtInDisplayID {
-            setBrightness?(id, dimBrightness)
-        }
-    }
-    
+
     private func checkApproach(_ mousePos: NSPoint) {
-        guard let builtInID = builtInDisplayID else { return }
-        
-        var distance: CGFloat = approachThreshold + 1
-        
-        // Simplified boundary check based on transitionSide
-        switch transitionSide {
-        case .left:
-            if mousePos.x >= 0 && mousePos.x < approachThreshold {
-                distance = mousePos.x
-            }
-        case .right:
-            // Needs exact screen frame info for robustness, but here's the logic
-            break 
-        default: break
+        var distance: CGFloat = CGFloat(settings.approachThreshold) + 1
+        if transitionSide == .left && mousePos.x >= 0 && mousePos.x < CGFloat(settings.approachThreshold) {
+            distance = mousePos.x
         }
         
-        if distance <= approachThreshold {
-            let proximity = (approachThreshold - distance) / approachThreshold
-            let targetBrightness = dimBrightness + (activeBrightness - dimBrightness) * Float(proximity)
-            setBrightness?(builtInID, targetBrightness)
+        if distance <= CGFloat(settings.approachThreshold) {
+            let proximity = (CGFloat(settings.approachThreshold) - distance) / CGFloat(settings.approachThreshold)
+            let target = settings.dimBrightness + (settings.activeBrightness - settings.dimBrightness) * Double(proximity)
+            applyBrightness(Float(target))
         }
     }
-    
+
+    func applyBrightness(_ value: Float) {
+        if let id = builtInDisplayID { _ = setBrightness?(id, value) }
+    }
+
+    private func setupHotkeys() {
+        registerHotkey(id: 1, keyCode: 122) // Cmd + F1
+        registerHotkey(id: 2, keyCode: 120) // Cmd + F2
+        registerHotkey(id: 3, keyCode: 99)  // Cmd + F3
+    }
+
+    private func registerHotkey(id: UInt32, keyCode: UInt32) {
+        var hotKeyRef: EventHotKeyRef?
+        let hotKeyID = EventHotKeyID(signature: 0x52415752, id: id)
+        RegisterEventHotKey(keyCode, UInt32(cmdKey), hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+        
+        var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { (_, event, userData) -> OSStatus in
+            var hID = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hID)
+            let mgr = Unmanaged<BrightnessManager>.fromOpaque(userData!).takeUnretainedValue()
+            switch hID.id {
+                case 1: mgr.forceWake(duration: mgr.settings.wakeDuration1)
+                case 2: mgr.forceWake(duration: mgr.settings.wakeDuration2)
+                case 3: mgr.forceWake(duration: mgr.settings.wakeDuration3)
+                default: break
+            }
+            return noErr
+        }, 1, &eventSpec, Unmanaged.passUnretained(self).toOpaque(), nil)
+    }
+
     func forceWake(duration: TimeInterval) {
-        print("FORCE WAKE for \(duration)s triggered.")
-        if let id = builtInDisplayID {
-            setBrightness?(id, activeBrightness)
-        }
+        applyBrightness(Float(settings.activeBrightness))
         dimTimer?.invalidate()
         dimTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
-            self?.dimRetina()
+            self?.applyBrightness(Float(self?.settings.dimBrightness ?? 0.01))
         }
     }
 }
 
-let manager = BrightnessManager()
-manager.start()
+// --- Views ---
+
+struct SettingsView: View {
+    @ObservedObject var settings: SettingsManager
+    @ObservedObject var manager: BrightnessManager
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("RetinaAware Settings").font(.headline)
+            
+            Form {
+                Section("General") {
+                    Toggle("Start at Login", isOn: $settings.startAtLogin)
+                }
+                
+                Section("Brightness") {
+                    HStack {
+                        Text("Active:")
+                        Slider(value: $settings.activeBrightness, in: 0...1)
+                        Text("\(Int(settings.activeBrightness * 100))%")
+                    }
+                    HStack {
+                        Text("Dimmed:")
+                        Slider(value: $settings.dimBrightness, in: 0...0.2)
+                        Text("\(Int(settings.dimBrightness * 100))%")
+                    }
+                    Button("Test Config") {
+                        manager.applyBrightness(Float(settings.activeBrightness))
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            manager.applyBrightness(Float(settings.dimBrightness))
+                        }
+                    }.buttonStyle(.borderedProminent)
+                }
+                
+                Section("Timing & Thresholds") {
+                    Stepper("Approach Threshold: \(Int(settings.approachThreshold))px", value: $settings.approachThreshold, in: 50...500, step: 10)
+                    Stepper("Base Dim Delay: \(Int(settings.dimDelay))s", value: $settings.dimDelay, in: 1...60)
+                    Stepper("Max Multiplier: \(Int(settings.maxWakeMultiplier))x", value: $settings.maxWakeMultiplier, in: 1...20)
+                    Stepper("Return Window: \(Int(settings.returnWindow))s", value: $settings.returnWindow, in: 5...60)
+                }
+                
+                Section("Hotkeys (Cmd + F1/F2/F3)") {
+                    Stepper("F1 Duration: \(Int(settings.wakeDuration1 / 60))m", value: $settings.wakeDuration1, in: 60...3600, step: 60)
+                    Stepper("F2 Duration: \(Int(settings.wakeDuration2 / 60))m", value: $settings.wakeDuration2, in: 60...3600, step: 60)
+                    Stepper("F3 Duration: \(Int(settings.wakeDuration3 / 60))m", value: $settings.wakeDuration3, in: 60...3600, step: 60)
+                }
+            }
+            .padding()
+            
+            Divider()
+            
+            HStack {
+                Text("v1.1 • made with ❤️ by nGoline in 🇧🇷")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button("Quit") { NSApplication.shared.terminate(nil) }
+                    .buttonStyle(.borderless)
+                    .foregroundColor(.red)
+            }
+            .padding(.horizontal)
+        }
+        .frame(width: 400, height: 600)
+        .padding()
+    }
+}
+
+// --- App Entry ---
+
+@main
+struct RetinaAwareApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    
+    var body: some Scene {
+        MenuBarExtra("RetinaAware", systemImage: "sun.max.trianglebadge.exclamationmark") {
+            SettingsView(settings: appDelegate.settings, manager: appDelegate.manager)
+        }
+        .menuBarExtraStyle(.window)
+    }
+}
+
+class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+    var settings = SettingsManager()
+    var manager = BrightnessManager()
+    
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Set app to be a menu bar app (no dock icon)
+        NSApp.setActivationPolicy(.accessory)
+        
+        manager.setup(with: settings)
+        manager.start()
+    }
+}
