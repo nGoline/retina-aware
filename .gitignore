@@ -11,4 +11,7 @@ DerivedData/
 *.err.log
 
 # vscode
-.vscode/
+.vscode
+
+# pre-built app
+**/MacOS/retina-aware

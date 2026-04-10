@@ -2,16 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.2.1] - 2026-04-10
-### Fixed
-- **Stuck Ramp Bug:** Fixed an issue where fast mouse movements would leave the Retina display at a partial brightness level. The logic now aggressively resets to dimmed state when exiting the approach zone.
-- **Launch Agent Permissions:** Updated `Makefile` to use `launchctl bootstrap` and `bootout` with the correct user domain, removing `sudo` requirements for agent management.
-- **Icon Visibility:** Improved app initialization to ensure the menu bar icon always appears, even when launched via Launch Agent.
-- **Enable/Disable Logic:** Disabling the app now forces the display to the "Active" state, and re-enabling it returns it to the "Dimmed" state.
+## [1.2.2] - 2026-04-10
+### Added
+- **Universal Distance Logic:** Replaced side-specific positioning with a distance-to-rect algorithm. Works for any monitor arrangement (Left, Right, Above, Below, Diagonal).
+- **Pro Hotkey Recorder:** New UI component to record custom keys (letters, numbers, special keys) with proper readable names.
+- **Dynamic Icons:** Status bar icon now updates instantly: Sun (Active), Moon (Dimmed), Cloud (Disabled).
+- **Tooltips:** Added info icons and tooltips to all configuration settings for better clarity.
+- **Packaging:** Added `make package` to generate a release-ready ZIP.
 
-### Changed
-- Transitioned to Semantic Versioning (SemVer).
-- Updated GUI layout for better clarity.
+### Fixed
+- **Stuck Ramp Bug:** Aggressive state reset ensuring the screen never gets stuck in a partially dimmed state.
+- **Grace Period Logic:** Prevents the proximity ramp from overriding an active "full brightness" timer.
+- **App Visibility:** Fixed `Info.plist` and `Makefile` permissions so the app opens correctly and shows in the menu bar.
+- **Alignment Fix:** Switched from `Form` to custom `VStack` to fix UI shifting issues.
+- **Crash Fix:** Improved initialization flow to prevent crashes when enabling the manager.
+
+## [1.2.1] - 2026-04-10
+- Initial beta fixes for Launch Agent and basic ramp logic.
 
 ## [1.2.0] - 2026-04-10
-- Initial feature-rich release with GUI, status icon, and proximity wake.
+- Initial feature release with GUI and proximity wake.

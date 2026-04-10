@@ -6,17 +6,8 @@ import ServiceManagement
 
 // --- Models ---
 
-enum RetinaPosition: String, CaseIterable, Identifiable {
-    case left = "Left"
-    case right = "Right"
-    case top = "Above"
-    case bottom = "Below"
-    var id: String { self.rawValue }
-}
-
 class SettingsManager: ObservableObject {
     @AppStorage("isEnabled") var isEnabled: Bool = true
-    @AppStorage("retinaPosition") var retinaPosition: RetinaPosition = .left
     @AppStorage("approachThreshold") var approachThreshold: Double = 150.0
     @AppStorage("dimBrightness") var dimBrightness: Double = 0.01
     @AppStorage("activeBrightness") var activeBrightness: Double = 0.5
@@ -27,18 +18,15 @@ class SettingsManager: ObservableObject {
         didSet { updateLoginItem() }
     }
     
-    // Wake durations for hotkeys
     @AppStorage("wakeDuration1") var wakeDuration1: Double = 60.0
     @AppStorage("wakeDuration2") var wakeDuration2: Double = 300.0
     @AppStorage("wakeDuration3") var wakeDuration3: Double = 600.0
     
-    // Key codes (Default F1=122, F2=120, F3=99)
-    @AppStorage("hotkey1Code") var hotkey1Code: Int = 122
-    @AppStorage("hotkey2Code") var hotkey2Code: Int = 120
-    @AppStorage("hotkey3Code") var hotkey3Code: Int = 99
+    @AppStorage("hotkey1") var hotkey1: Int = 122 // F1
+    @AppStorage("hotkey2") var hotkey2: Int = 120 // F2
+    @AppStorage("hotkey3") var hotkey3: Int = 99  // F3
     
     private func updateLoginItem() {
-        // Since we are now an app, we should use loginItem instead of register() for Daemons
         do {
             if startAtLogin {
                 try SMAppService.loginItem(identifier: "com.user.retina-aware").register()
@@ -57,13 +45,14 @@ typealias GetBrightnessFunc = @convention(c) (CGDirectDisplayID, UnsafeMutablePo
 typealias SetBrightnessFunc = @convention(c) (CGDirectDisplayID, Float) -> Int32
 
 class BrightnessManager: ObservableObject {
-    @Published var isDimmed: Bool = false
+    @Published var isDimmed: Bool = true // FIX: Start dimmed for the moon icon
     
     private var getBrightness: GetBrightnessFunc?
     private var setBrightness: SetBrightnessFunc?
     private var frameworkHandle: UnsafeMutableRawPointer?
 
     private var builtInDisplayID: CGDirectDisplayID?
+    private var hotKeyRefs: [EventHotKeyRef?] = [nil, nil, nil]
     
     private var isMouseOnRetina = false
     private var lastRetinaExitTime: Date?
@@ -71,7 +60,7 @@ class BrightnessManager: ObservableObject {
     private var timer: Timer?
     private var dimTimer: Timer?
     
-    var settings: SettingsManager!
+    var settings: SettingsManager?
 
     init() {
         loadFramework()
@@ -81,6 +70,14 @@ class BrightnessManager: ObservableObject {
     func setup(with settings: SettingsManager) {
         self.settings = settings
         setupHotkeys()
+        
+        // Ensure startup state matches isDimmed = true
+        if settings.isEnabled {
+            dimRetina()
+        } else {
+            applyBrightness(Float(settings.activeBrightness))
+            self.isDimmed = false
+        }
     }
 
     private func loadFramework() {
@@ -108,13 +105,14 @@ class BrightnessManager: ObservableObject {
     }
 
     func start() {
+        guard timer == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             self?.checkMousePosition()
         }
     }
 
     private func checkMousePosition() {
-        guard settings.isEnabled else { return }
+        guard let settings = settings, settings.isEnabled else { return }
         
         let mousePos = NSEvent.mouseLocation
         let onRetina = isPointOnRetina(mousePos)
@@ -131,17 +129,18 @@ class BrightnessManager: ObservableObject {
 
     private func isPointOnRetina(_ point: NSPoint) -> Bool {
         guard let id = builtInDisplayID else { return false }
-        let screens = NSScreen.screens
-        return screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == id }?.frame.contains(point) ?? false
+        return NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == id }?.frame.contains(point) ?? false
     }
 
     private func handleRetinaEntry() {
         dimTimer?.invalidate()
         dimTimer = nil
-        isDimmed = false
-        applyBrightness(Float(settings.activeBrightness))
+        DispatchQueue.main.async { self.isDimmed = false }
+        if let settings = settings {
+            applyBrightness(Float(settings.activeBrightness))
+        }
         
-        if let lastExit = lastRetinaExitTime {
+        if let lastExit = lastRetinaExitTime, let settings = settings {
             if Date().timeIntervalSince(lastExit) < settings.returnWindow {
                 wakeTimeMultiplier = min(wakeTimeMultiplier * 1.5, settings.maxWakeMultiplier)
             } else {
@@ -153,58 +152,40 @@ class BrightnessManager: ObservableObject {
     private func handleRetinaExit() {
         lastRetinaExitTime = Date()
         dimTimer?.invalidate()
+        guard let settings = settings else { return }
         dimTimer = Timer.scheduledTimer(withTimeInterval: settings.dimDelay * wakeTimeMultiplier, repeats: false) { [weak self] _ in
             self?.dimRetina()
+            self?.dimTimer = nil
         }
     }
 
     func dimRetina() {
-        isDimmed = true
-        applyBrightness(Float(settings.dimBrightness))
+        DispatchQueue.main.async { self.isDimmed = true }
+        if let settings = settings {
+            applyBrightness(Float(settings.dimBrightness))
+        }
     }
 
     private func checkApproach(_ mousePos: NSPoint) {
         guard let id = builtInDisplayID,
+              let settings = settings,
               let retinaScreen = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == id }) else { return }
         
         let retinaFrame = retinaScreen.frame
-        var distance: CGFloat = CGFloat(settings.approachThreshold) + 1
+        let threshold = CGFloat(settings.approachThreshold)
         
-        // Border detection
-        switch settings.retinaPosition {
-        case .left:
-            if mousePos.x >= retinaFrame.maxX && mousePos.x < retinaFrame.maxX + CGFloat(settings.approachThreshold) {
-                if mousePos.y >= retinaFrame.minY && mousePos.y <= retinaFrame.maxY {
-                    distance = mousePos.x - retinaFrame.maxX
-                }
-            }
-        case .right:
-            if mousePos.x <= retinaFrame.minX && mousePos.x > retinaFrame.minX - CGFloat(settings.approachThreshold) {
-                if mousePos.y >= retinaFrame.minY && mousePos.y <= retinaFrame.maxY {
-                    distance = retinaFrame.minX - mousePos.x
-                }
-            }
-        case .top:
-            if mousePos.y <= retinaFrame.minY && mousePos.y > retinaFrame.minY - CGFloat(settings.approachThreshold) {
-                if mousePos.x >= retinaFrame.minX && mousePos.x <= retinaFrame.maxX {
-                    distance = retinaFrame.minY - mousePos.y
-                }
-            }
-        case .bottom:
-            if mousePos.y >= retinaFrame.maxY && mousePos.y < retinaFrame.maxY + CGFloat(settings.approachThreshold) {
-                if mousePos.x >= retinaFrame.minX && mousePos.x <= retinaFrame.maxX {
-                    distance = mousePos.y - retinaFrame.maxY
-                }
-            }
-        }
+        let dx = max(retinaFrame.minX - mousePos.x, 0, mousePos.x - retinaFrame.maxX)
+        let dy = max(retinaFrame.minY - mousePos.y, 0, mousePos.y - retinaFrame.maxY)
+        let distance = sqrt(dx*dx + dy*dy)
         
-        if distance <= CGFloat(settings.approachThreshold) {
-            let proximity = (CGFloat(settings.approachThreshold) - distance) / CGFloat(settings.approachThreshold)
-            let target = settings.dimBrightness + (settings.activeBrightness - settings.dimBrightness) * Double(proximity)
-            applyBrightness(Float(target))
-            isDimmed = false
+        if distance <= threshold {
+            if dimTimer == nil {
+                let proximity = (threshold - distance) / threshold
+                let target = settings.dimBrightness + (settings.activeBrightness - settings.dimBrightness) * Double(proximity)
+                applyBrightness(Float(target))
+                DispatchQueue.main.async { self.isDimmed = false }
+            }
         } else {
-            // FIX: If we are not in approach zone AND not in Retina, we MUST be dimmed (unless force-wake timer is active)
             if dimTimer == nil && !isDimmed {
                 dimRetina()
             }
@@ -216,15 +197,27 @@ class BrightnessManager: ObservableObject {
     }
 
     func setupHotkeys() {
-        registerHotkey(id: 1, keyCode: UInt32(settings.hotkey1Code))
-        registerHotkey(id: 2, keyCode: UInt32(settings.hotkey2Code))
-        registerHotkey(id: 3, keyCode: UInt32(settings.hotkey3Code))
+        clearHotkeys()
+        guard let settings = settings else { return }
+        registerHotkey(id: 1, keyCode: UInt32(settings.hotkey1))
+        registerHotkey(id: 2, keyCode: UInt32(settings.hotkey2))
+        registerHotkey(id: 3, keyCode: UInt32(settings.hotkey3))
+    }
+    
+    private func clearHotkeys() {
+        for i in 0..<hotKeyRefs.count {
+            if let ref = hotKeyRefs[i] {
+                UnregisterEventHotKey(ref)
+                hotKeyRefs[i] = nil
+            }
+        }
     }
 
     private func registerHotkey(id: UInt32, keyCode: UInt32) {
         var hotKeyRef: EventHotKeyRef?
         let hotKeyID = EventHotKeyID(signature: 0x52415752, id: id)
         RegisterEventHotKey(keyCode, UInt32(cmdKey), hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+        hotKeyRefs[Int(id-1)] = hotKeyRef
         
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { (_, event, userData) -> OSStatus in
@@ -232,12 +225,12 @@ class BrightnessManager: ObservableObject {
             GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hID)
             let mgr = Unmanaged<BrightnessManager>.fromOpaque(userData!).takeUnretainedValue()
             
-            guard mgr.settings.isEnabled else { return noErr }
+            guard let settings = mgr.settings, settings.isEnabled else { return noErr }
             
             switch hID.id {
-                case 1: mgr.forceWake(duration: mgr.settings.wakeDuration1)
-                case 2: mgr.forceWake(duration: mgr.settings.wakeDuration2)
-                case 3: mgr.forceWake(duration: mgr.settings.wakeDuration3)
+                case 1: mgr.forceWake(duration: settings.wakeDuration1)
+                case 2: mgr.forceWake(duration: settings.wakeDuration2)
+                case 3: mgr.forceWake(duration: settings.wakeDuration3)
                 default: break
             }
             return noErr
@@ -245,16 +238,97 @@ class BrightnessManager: ObservableObject {
     }
 
     func forceWake(duration: TimeInterval) {
-        isDimmed = false
-        applyBrightness(Float(settings.activeBrightness))
+        DispatchQueue.main.async { self.isDimmed = false }
+        if let settings = settings {
+            applyBrightness(Float(settings.activeBrightness))
+        }
         dimTimer?.invalidate()
         dimTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
             self?.dimRetina()
+            self?.dimTimer = nil
         }
     }
 }
 
 // --- Views ---
+
+struct LabelWithTooltip: View {
+    let text: String
+    let tooltip: String
+    
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(text)
+            Image(systemName: "info.circle")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .help(tooltip)
+    }
+}
+
+struct HotkeyRecorder: View {
+    @Binding var keyCode: Int
+    @State private var isRecording = false
+    let label: String
+    let tooltip: String
+    
+    var body: some View {
+        HStack {
+            LabelWithTooltip(text: label, tooltip: tooltip)
+                .font(.subheadline)
+            Spacer()
+            Button(action: { isRecording = true }) {
+                Text(isRecording ? "• • •" : keyName(for: keyCode))
+                    .frame(width: 80)
+            }
+            .buttonStyle(.bordered)
+            .background(KeyEventView(isRecording: $isRecording, keyCode: $keyCode))
+        }
+    }
+    
+    private func keyName(for code: Int) -> String {
+        let mapping: [Int: String] = [
+            0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X", 8: "C", 9: "V", 11: "B", 12: "Q", 13: "W", 14: "E", 15: "R", 16: "Y", 17: "T", 18: "1", 19: "2", 20: "3", 21: "4", 22: "6", 23: "5", 24: "=", 25: "9", 26: "7", 27: "-", 28: "8", 29: "0", 30: "]", 31: "O", 32: "U", 33: "[", 34: "I", 35: "P", 36: "Return", 37: "L", 38: "J", 39: "'", 40: "K", 41: ";", 42: "\\", 43: ",", 44: "/", 45: "N", 46: "M", 47: ".", 48: "Tab", 49: "Space", 50: "`", 51: "Delete", 53: "Esc",
+            122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6", 98: "F7", 100: "F8", 101: "F9", 109: "F10", 103: "F11", 111: "F12"
+        ]
+        return mapping[code] ?? "Key \(code)"
+    }
+}
+
+struct KeyEventView: NSViewRepresentable {
+    @Binding var isRecording: Bool
+    @Binding var keyCode: Int
+    
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if isRecording {
+            NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                self.keyCode = Int(event.keyCode)
+                self.isRecording = false
+                return nil
+            }
+        }
+    }
+}
+
+struct SectionHeader: View {
+    let title: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .fontWeight(.bold)
+                .foregroundColor(.secondary)
+                .padding(.top, 8)
+            Divider()
+        }
+    }
+}
 
 struct SettingsView: View {
     @ObservedObject var settings: SettingsManager
@@ -262,12 +336,12 @@ struct SettingsView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // Header
             HStack {
                 Text("RetinaAware").font(.system(size: 18, weight: .bold))
                 Spacer()
                 Toggle("", isOn: $settings.isEnabled)
                     .toggleStyle(.switch)
+                    .help("Enable or disable RetinaAware entirely.")
                     .onChange(of: settings.isEnabled) { value in
                         if value {
                             manager.dimRetina()
@@ -281,68 +355,102 @@ struct SettingsView: View {
             .background(Color.secondary.opacity(0.1))
             
             ScrollView {
-                Form {
-                    Section("Display Configuration") {
-                        Picker("Retina Position:", selection: $settings.retinaPosition) {
-                            ForEach(RetinaPosition.allCases) { pos in
-                                Text(pos.rawValue).tag(pos)
-                            }
-                        }
+                VStack(alignment: .leading, spacing: 16) {
+                    Group {
+                        SectionHeader(title: "DISPLAY CONFIGURATION")
+                        
                         Toggle("Start at Login", isOn: $settings.startAtLogin)
+                            .help("Automatically launch RetinaAware when you log into your Mac.")
                     }
                     
-                    Section("Brightness Levels") {
-                        HStack {
-                            Text("Active:")
+                    Group {
+                        SectionHeader(title: "BRIGHTNESS LEVELS")
+                        VStack(alignment: .leading, spacing: 8) {
+                            LabelWithTooltip(text: "Active Brightness: \(Int(settings.activeBrightness * 100))%", tooltip: "The brightness level used when you are actively using the Retina display.")
                             Slider(value: $settings.activeBrightness, in: 0...1)
-                            Text("\(Int(settings.activeBrightness * 100))%")
-                        }
-                        HStack {
-                            Text("Dimmed:")
+                            
+                            LabelWithTooltip(text: "Dimmed Brightness: \(Int(settings.dimBrightness * 100))%", tooltip: "The low brightness level used to protect the screen when the mouse is on another monitor.")
                             Slider(value: $settings.dimBrightness, in: 0...0.2)
-                            Text("\(Int(settings.dimBrightness * 100))%")
-                        }
-                        Button("Test Levels (2s cycle)") {
-                            manager.applyBrightness(Float(settings.activeBrightness))
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                                if settings.isEnabled {
-                                    manager.applyBrightness(Float(settings.dimBrightness))
+                            
+                            Button("Test Levels (2s cycle)") {
+                                manager.applyBrightness(Float(settings.activeBrightness))
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                    if settings.isEnabled {
+                                        manager.applyBrightness(Float(settings.dimBrightness))
+                                    }
                                 }
                             }
-                        }.buttonStyle(.bordered)
+                            .buttonStyle(.bordered)
+                            .help("Instantly cycles between Active and Dimmed brightness to verify your settings.")
+                        }
                     }
                     
-                    Section("Behavior") {
-                        Stepper("Approach Trigger: \(Int(settings.approachThreshold))px", value: $settings.approachThreshold, in: 50...500, step: 10)
-                        Stepper("Base Dim Delay: \(Int(settings.dimDelay))s", value: $settings.dimDelay, in: 1...60)
-                        Stepper("Max Wake Ext: \(Int(settings.maxWakeMultiplier))x", value: $settings.maxWakeMultiplier, in: 1...20)
-                        Stepper("Return Window: \(Int(settings.returnWindow))s", value: $settings.returnWindow, in: 5...60)
+                    Group {
+                        SectionHeader(title: "BEHAVIOR")
+                        VStack(spacing: 12) {
+                            HStack {
+                                LabelWithTooltip(text: "Approach Trigger", tooltip: "How far the mouse needs to be from the border to start waking up the display.")
+                                Spacer()
+                                Stepper("\(Int(settings.approachThreshold))px", value: $settings.approachThreshold, in: 50...500, step: 10)
+                            }
+                            
+                            HStack {
+                                LabelWithTooltip(text: "Base Dim Delay", tooltip: "The initial grace period (seconds) before the screen dims after the mouse leaves.")
+                                Spacer()
+                                Stepper("\(Int(settings.dimDelay))s", value: $settings.dimDelay, in: 1...60)
+                            }
+                            
+                            HStack {
+                                LabelWithTooltip(text: "Max Wake Multiplier", tooltip: "The maximum multiplier applied to the dim delay if you keep returning to the screen frequently.")
+                                Spacer()
+                                Stepper("\(Int(settings.maxWakeMultiplier))x", value: $settings.maxWakeMultiplier, in: 1...20)
+                            }
+                            
+                            HStack {
+                                LabelWithTooltip(text: "Return Window", tooltip: "The time window (seconds) within which returning to the screen triggers the wake extension.")
+                                Spacer()
+                                Stepper("\(Int(settings.returnWindow))s", value: $settings.returnWindow, in: 5...60)
+                            }
+                        }
                     }
                     
-                    Section("Hotkeys (Cmd + KeyCode)") {
-                        HStack {
-                            Text("F1 duration:")
-                            Stepper("\(Int(settings.wakeDuration1 / 60))m", value: $settings.wakeDuration1, in: 60...3600, step: 60)
+                    Group {
+                        SectionHeader(title: "HOTKEYS (CMD + RECORDED KEY)")
+                        VStack(spacing: 10) {
+                            HStack {
+                                HotkeyRecorder(keyCode: $settings.hotkey1, label: "Wake 1", tooltip: "Override duration for Cmd+RecordedKey manual wake trigger.")
+                                Spacer()
+                                Stepper("\(Int(settings.wakeDuration1 / 60))m", value: $settings.wakeDuration1, in: 60...3600, step: 60)
+                            }
+                            HStack {
+                                HotkeyRecorder(keyCode: $settings.hotkey2, label: "Wake 2", tooltip: "Override duration for Cmd+RecordedKey manual wake trigger.")
+                                Spacer()
+                                Stepper("\(Int(settings.wakeDuration2 / 60))m", value: $settings.wakeDuration2, in: 60...3600, step: 60)
+                            }
+                            HStack {
+                                HotkeyRecorder(keyCode: $settings.hotkey3, label: "Wake 3", tooltip: "Override duration for Cmd+RecordedKey manual wake trigger.")
+                                Spacer()
+                                Stepper("\(Int(settings.wakeDuration3 / 60))m", value: $settings.wakeDuration3, in: 60...3600, step: 60)
+                            }
                         }
-                        HStack {
-                            Text("F2 duration:")
-                            Stepper("\(Int(settings.wakeDuration2 / 60))m", value: $settings.wakeDuration2, in: 60...3600, step: 60)
-                        }
-                        HStack {
-                            Text("F3 duration:")
-                            Stepper("\(Int(settings.wakeDuration3 / 60))m", value: $settings.wakeDuration3, in: 60...3600, step: 60)
-                        }
-                        Text("Current Keys: F1(122), F2(120), F3(99)").font(.caption2).foregroundColor(.secondary)
+                        .onChange(of: settings.hotkey1) { _ in manager.setupHotkeys() }
+                        .onChange(of: settings.hotkey2) { _ in manager.setupHotkeys() }
+                        .onChange(of: settings.hotkey3) { _ in manager.setupHotkeys() }
                     }
                 }
                 .padding()
             }
+            .onAppear {
+                if manager.settings == nil {
+                    manager.setup(with: settings)
+                    manager.start()
+                }
+            }
             
-            // Footer
             VStack(spacing: 4) {
                 Divider()
                 HStack {
-                    Text("v1.2.1 • made with ❤️ by nGoline in 🇧🇷")
+                    Text("v1.2.2 • made with ❤️ by nGoline in 🇧🇷")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
                     Spacer()
@@ -356,35 +464,47 @@ struct SettingsView: View {
             }
             .background(Color.secondary.opacity(0.05))
         }
-        .frame(width: 380, height: 620)
+        .frame(width: 380, height: 650)
     }
 }
 
-// --- App Entry ---
-
 @main
 struct RetinaAwareApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @StateObject private var settings = SettingsManager()
+    @StateObject private var manager = BrightnessManager()
     
     var body: some Scene {
         MenuBarExtra {
-            SettingsView(settings: appDelegate.settings, manager: appDelegate.manager)
+            SettingsView(settings: settings, manager: manager)
         } label: {
-            // Feature 4: Dynamic Icon Color/Style
-            Image(systemName: appDelegate.manager.isDimmed ? "sun.min" : "sun.max.fill")
-                .foregroundColor(appDelegate.manager.isDimmed ? .secondary : .orange)
+            IconView(settings: settings, manager: manager)
         }
         .menuBarExtraStyle(.window)
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
-    var settings = SettingsManager()
-    var manager = BrightnessManager()
+struct IconView: View {
+    @ObservedObject var settings: SettingsManager
+    @ObservedObject var manager: BrightnessManager
     
+    var body: some View {
+        if !settings.isEnabled {
+            Image(systemName: "cloud.sun.fill")
+                .foregroundColor(.secondary)
+        } else {
+            if manager.isDimmed {
+                Image(systemName: "moon.fill")
+                    .foregroundColor(.indigo)
+            } else {
+                Image(systemName: "sun.max.fill")
+                    .foregroundColor(.orange)
+            }
+        }
+    }
+}
+
+class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        manager.setup(with: settings)
-        manager.start()
     }
 }
