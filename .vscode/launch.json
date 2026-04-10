@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:retina-aware}",
+            "name": "Debug retina-aware",
+            "target": "retina-aware",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug retina-aware"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:retina-aware}",
+            "name": "Release retina-aware",
+            "target": "retina-aware",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release retina-aware"
+        }
+    ]
+}

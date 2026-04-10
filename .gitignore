@@ -1,0 +1,11 @@
+# Swift
+.build/
+.swiftpm/
+*.xcodeproj/
+DerivedData/
+
+# OS
+.DS_Store
+*.swp
+*.out.log
+*.err.log
