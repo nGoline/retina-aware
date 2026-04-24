@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.3] - 2026-04-24
+### Fixed
+- **Timer Preservation Bug:** Moving the mouse into and out of the Retina display no longer resets a longer active timer (e.g. from a hotkey wake). The longer of the remaining hotkey timer and the base dim delay is always used, so a 10-minute wake survives mouse in/out cycles while a nearly-expired timer correctly defers to the base delay.
+
 ## [1.2.2] - 2026-04-10
 ### Added
 - **Universal Distance Logic:** Replaced side-specific positioning with a distance-to-rect algorithm. Works for any monitor arrangement (Left, Right, Above, Below, Diagonal).

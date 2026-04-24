@@ -59,6 +59,7 @@ class BrightnessManager: ObservableObject {
     private var wakeTimeMultiplier: Double = 1.0
     private var timer: Timer?
     private var dimTimer: Timer?
+    private var scheduledDimFireDate: Date?
     
     var settings: SettingsManager?
 
@@ -133,6 +134,10 @@ class BrightnessManager: ObservableObject {
     }
 
     private func handleRetinaEntry() {
+        // Save fire date so handleRetinaExit can preserve a longer active timer
+        if let timer = dimTimer, timer.isValid {
+            scheduledDimFireDate = timer.fireDate
+        }
         dimTimer?.invalidate()
         dimTimer = nil
         DispatchQueue.main.async { self.isDimmed = false }
@@ -151,9 +156,25 @@ class BrightnessManager: ObservableObject {
 
     private func handleRetinaExit() {
         lastRetinaExitTime = Date()
-        dimTimer?.invalidate()
         guard let settings = settings else { return }
-        dimTimer = Timer.scheduledTimer(withTimeInterval: settings.dimDelay * wakeTimeMultiplier, repeats: false) { [weak self] _ in
+        let baseDelay = settings.dimDelay * wakeTimeMultiplier
+        var delay = baseDelay
+
+        // Case: hotkey was pressed while mouse was ON Retina (dimTimer still active)
+        if let currentTimer = dimTimer, currentTimer.isValid {
+            let remaining = currentTimer.fireDate.timeIntervalSinceNow
+            if remaining > delay { delay = remaining }
+        }
+
+        // Case: hotkey was pressed while mouse was OFF Retina, then mouse entered (timer was saved)
+        if let fireDate = scheduledDimFireDate {
+            let remaining = fireDate.timeIntervalSinceNow
+            if remaining > delay { delay = remaining }
+            scheduledDimFireDate = nil
+        }
+
+        dimTimer?.invalidate()
+        dimTimer = Timer.scheduledTimer(withTimeInterval: max(0.01, delay), repeats: false) { [weak self] _ in
             self?.dimRetina()
             self?.dimTimer = nil
         }
@@ -450,7 +471,7 @@ struct SettingsView: View {
             VStack(spacing: 4) {
                 Divider()
                 HStack {
-                    Text("v1.2.2 • made with ❤️ by nGoline in 🇧🇷")
+                    Text("v1.2.3 • made with ❤️ by nGoline in 🇧🇷")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
                     Spacer()
